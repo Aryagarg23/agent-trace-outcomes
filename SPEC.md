@@ -71,6 +71,8 @@ Agent Trace's non-goals state: *"We don't evaluate whether AI contributions are 
 
 ## 5. Architecture Overview
 
+![Producers (CI, an agent loop, or the CLI) write Outcome Records at the verification gate; records are stored as repo files or git notes; consumers (a merge gate, context assembly, or a log) read them back. Agent Trace records are an optional side input, linked via trace_ids.](./docs/architecture.svg)
+
 An Outcome Record is produced at a host's verification gate — the moment a change's checks complete. The producer can be a CI job (the reference GitHub Action), an agent loop calling the library, or a developer using the CLI. The record is stored in the repository (a file under `.agent-trace/outcomes/`, or a git note) and read back by two kinds of consumers: gates asking whether a revision was verified, and context assemblers asking what has been tried near a set of paths.
 
 Producing and consuming are independent. A repository can write records with no consumer installed, and a consumer can read records it did not produce. Nothing coordinates producers and consumers except the record format itself.

@@ -15,6 +15,10 @@ The intended use: post-incident analysis becomes a query instead of log archaeol
 
 > **Not quality assessment.** The parent spec's non-goals state: *"We don't evaluate whether AI contributions are good or bad."* This extension keeps that stance: it records facts about verification events, not judgments — the `verdict` is a mechanical aggregation of check statuses under a fixed rule, never a score. Also non-goals: orchestration opinions, storage mandates, servers, accounts, telemetry, and runtime execution tracing. See [SPEC.md §3](./SPEC.md#3-non-goals).
 
+## Architecture
+
+![Producers (CI, an agent loop, or the CLI) write Outcome Records at the verification gate; records are stored as repo files or git notes; consumers (a merge gate, context assembly, or a log) read them back. Agent Trace records are an optional side input, linked via trace_ids.](./docs/architecture.svg)
+
 ## The record
 
 ```json

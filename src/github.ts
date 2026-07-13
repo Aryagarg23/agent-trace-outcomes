@@ -83,12 +83,17 @@ export function statusFromConclusion(run: CheckRun): CheckStatus {
   }
 }
 
-/** Heuristic mapping from a check-run name to a check kind. */
+/**
+ * Heuristic mapping from a check-run name to a check kind. `spec`, `jest`,
+ * `style`, and `format` are word-bounded because, unbounded, they match
+ * inside unrelated words ("inspect", "majestic", "lifestyle", "reformat"),
+ * misclassifying non-test/lint checks as test/lint.
+ */
 export function inferCheckKind(name: string): CheckKind {
   const n = name.toLowerCase();
   if (/security|codeql|audit|snyk|trivy|semgrep/.test(n)) return "security";
-  if (/\btest|spec|jest|vitest|pytest|e2e|integration/.test(n)) return "test";
-  if (/lint|eslint|prettier|format|style/.test(n)) return "lint";
+  if (/\btest|\bspec\b|\bjest\b|vitest|pytest|e2e|integration/.test(n)) return "test";
+  if (/lint|eslint|prettier|\bformat\b|\bstyle\b/.test(n)) return "lint";
   if (/typecheck|type-check|\btsc\b|mypy|pyright/.test(n)) return "typecheck";
   if (/build|compile|bundle/.test(n)) return "build";
   if (/deploy|release|publish/.test(n)) return "deploy";

@@ -65,6 +65,17 @@ export const defaultExec: ExecFn = (cmd, args, opts = {}) =>
       cwd: opts.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      // `git notes add` creates a commit under the hood, which fails with
+      // "Author identity unknown" on any machine without global git config
+      // (fresh CI runners, containers). Fall back to a synthetic identity
+      // rather than depend on ambient config; real identities still win.
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "atrace-outcomes",
+        GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "atrace-outcomes@local",
+        GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "atrace-outcomes",
+        GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "atrace-outcomes@local",
+      },
     });
     let stdout = "";
     let stderr = "";

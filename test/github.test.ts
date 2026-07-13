@@ -50,6 +50,13 @@ describe("inferCheckKind", () => {
     expect(inferCheckKind("deploy-preview")).toBe("deploy");
     expect(inferCheckKind("mystery-job")).toBe("other");
   });
+
+  it("does not misclassify unrelated words containing test/lint fragments", () => {
+    expect(inferCheckKind("inspect-bundle")).toBe("build");
+    expect(inferCheckKind("majestic-report")).toBe("other");
+    expect(inferCheckKind("lifestyle-configs")).toBe("other");
+    expect(inferCheckKind("respect-conventions")).toBe("other");
+  });
 });
 
 describe("checksFromCheckRuns", () => {

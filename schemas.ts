@@ -605,7 +605,7 @@ function orderKeys(value: unknown, path: string): unknown {
   const out: Record<string, unknown> = {};
   for (const key of sorted) {
     const childPath = path === "" ? key : `${path}.${key}`;
-    out[key] = orderKeys(value[key], FIELD_ORDER[childPath] ? childPath : childPath);
+    out[key] = orderKeys(value[key], childPath);
   }
   return out;
 }

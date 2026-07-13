@@ -1,5 +1,7 @@
 # agent-trace-outcomes
 
+> **Status:** v0.1.0, being dogfooded on real repositories before any upstream proposal. Schema and API may still change based on that usage. [RFC-ISSUE.md](./RFC-ISSUE.md) is the proposal this project intends to open against [cursor/agent-trace](https://github.com/cursor/agent-trace) once it has — not yet filed.
+
 **Verification receipts for git commits.** An Outcome Record describes the verified outcome of a code change — which checks ran, what the results were, who reviewed it, and what lesson was learned — as a plain JSON record that lives in the repository. Records attach to commits, so they work on any git repo: human commits, agent commits, repos with no attribution tooling.
 
 When [Agent Trace](https://github.com/cursor/agent-trace) records are present (Agent Trace answers "who or what wrote this code"), outcomes link back to them via `trace_ids`. This project is designed as an additive extension to that specification, but does not depend on it.

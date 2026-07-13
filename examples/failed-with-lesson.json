@@ -1,0 +1,38 @@
+{
+  "version": "0.1.0",
+  "id": "e8f9a0b1-c2d3-4e5f-8a9b-0c1d2e3f4a5b",
+  "timestamp": "2026-07-12T22:14:07Z",
+  "trace_ids": ["6ba7b810-9dad-41d1-80b4-00c04fd430c8"],
+  "vcs": {
+    "type": "git",
+    "revision": "c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0"
+  },
+  "intent": {
+    "summary": "Cache session lookups in Redis to cut auth latency",
+    "source": {
+      "type": "plan",
+      "path": "docs/plans/2026-07-session-cache.md"
+    }
+  },
+  "checks": [
+    {
+      "name": "unit-tests",
+      "kind": "test",
+      "status": "pass"
+    },
+    {
+      "name": "integration-tests",
+      "kind": "test",
+      "status": "fail",
+      "detail_url": "https://github.com/example/api/actions/runs/9911002",
+      "summary": "3 failures in session-revocation.spec.ts: revoked sessions stay valid until cache TTL"
+    }
+  ],
+  "verdict": "failed",
+  "reviewed_by": [{ "type": "human", "id": "arya" }],
+  "lesson": {
+    "summary": "Caching sessions by ID breaks revocation: a revoked session stays valid until TTL expiry. Any session cache here must be invalidated on the revocation path (or key on a generation counter), not just expire. The next attempt should start from the revocation path, not the cache.",
+    "tags": ["auth", "caching", "revocation"],
+    "applies_to": ["src/auth/session.ts", "src/auth/revoke.ts"]
+  }
+}

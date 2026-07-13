@@ -1,0 +1,55 @@
+{
+  "version": "0.1.0",
+  "id": "7d0a1b2c-3d4e-4f5a-9b6c-7d8e9f0a1b2c",
+  "timestamp": "2026-07-13T19:05:42Z",
+  "trace_ids": ["550e8400-e29b-41d4-a716-446655440000"],
+  "vcs": {
+    "type": "git",
+    "revision": "3a1b5c7d9e2f4a6b8c0d1e3f5a7b9c1d2e4f6a8b"
+  },
+  "intent": {
+    "summary": "Add rate limiting to the public API endpoints",
+    "source": {
+      "type": "issue",
+      "url": "https://github.com/example/api/issues/128"
+    }
+  },
+  "checks": [
+    {
+      "name": "unit-tests",
+      "kind": "test",
+      "status": "pass",
+      "detail_url": "https://github.com/example/api/actions/runs/9912345",
+      "summary": "412 passed"
+    },
+    {
+      "name": "typecheck",
+      "kind": "typecheck",
+      "status": "pass"
+    },
+    {
+      "name": "CodeQL",
+      "kind": "security",
+      "status": "pass"
+    },
+    {
+      "name": "load-test",
+      "kind": "test",
+      "status": "skip",
+      "summary": "skipped on PR builds"
+    }
+  ],
+  "verdict": "verified",
+  "reviewed_by": [
+    { "type": "human", "id": "arya" },
+    { "type": "ai", "id": "anthropic/claude-fable-5" }
+  ],
+  "lesson": {
+    "summary": "Sliding-window limiting at the gateway was enough; per-route token buckets added complexity without measurable benefit in load tests.",
+    "tags": ["rate-limiting", "api"],
+    "applies_to": ["src/gateway/**"]
+  },
+  "metadata": {
+    "com.example.ci": { "pipeline": "api-main", "attempt": 1 }
+  }
+}

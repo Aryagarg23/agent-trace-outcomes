@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Personal build notes — not part of the published repo
+.notes/
+*.tgz

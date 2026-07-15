@@ -1,6 +1,6 @@
 {
   "name": "agent-trace-outcomes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Outcome Records for Agent Trace — an additive extension that records the verified outcome of code changes: which checks ran, the results, who reviewed it, and what lesson was learned.",
   "keywords": [
     "agent-trace",

@@ -32,4 +32,24 @@ describe("examples/", () => {
     expect(failed.verdict).toBe("failed");
     expect(failed.lesson?.summary).toBeTruthy();
   });
+
+  it("includes a fleet attempt record demonstrating the v0.2.0 fields", async () => {
+    const fleet = JSON.parse(
+      await readFile(path.join(dir, "fleet-attempt.json"), "utf8"),
+    ) as {
+      version: string;
+      task_id?: string;
+      derived_from?: string;
+      selected?: boolean;
+      vcs: { workspace_state?: string; diff?: string };
+      coverage?: { total: number };
+    };
+    expect(fleet.version).toBe("0.2.0");
+    expect(fleet.task_id).toBeTruthy();
+    expect(fleet.derived_from).toBeTruthy();
+    expect(fleet.selected).toBe(true);
+    expect(fleet.vcs.workspace_state).toBe("dirty");
+    expect(fleet.vcs.diff).toBeTruthy();
+    expect(fleet.coverage?.total).toBeGreaterThan(0);
+  });
 });

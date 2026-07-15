@@ -99,6 +99,14 @@ function truncate(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, width - 1)}…`;
 }
 
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 const program = new Command();
 
 program
@@ -125,11 +133,17 @@ program
     [] as string[],
   )
   .option("--trace-id <uuid>", "Agent Trace record ID this outcome verifies (repeatable)", collect, [] as string[])
+  .option("--task-id <uuid>", "stable id shared by every attempt at this task, across revisions")
+  .option("--derived-from <uuid>", "id of the parent outcome record this attempt forked from")
   .option("--reviewed-by <spec>", "reviewer as human:<login> or ai:<provider/model> (repeatable)", collect, [] as string[])
   .option("--lesson <summary>", "what this change taught, for future retrieval")
   .option("--tag <tag>", "lesson tag (repeatable)", collect, [] as string[])
   .option("--applies-to <path>", "path/glob the lesson applies to (repeatable)", collect, [] as string[])
   .option("--revision <sha>", "commit to record against (default: HEAD)")
+  .option("--dirty", "mark the checks as having run against a dirty worktree on top of revision")
+  .option("--diff-file <path>", "unified diff of what was tested, read from a file (or - for stdin)")
+  .option("--selected", "mark this explored branch as the one kept")
+  .option("--pruned", "mark this explored branch as pruned")
   .option("--verdict <verdict>", `override the derived verdict (${VERDICTS.join("|")})`)
   .option("--from-ci", "populate revision and a check from GitHub Actions env vars")
   .option("--status <status>", "job status for --from-ci (pass|fail|error, or success|failure|cancelled)")
@@ -200,6 +214,15 @@ program
     if (opts.intentSource && !INTENT_SOURCE_TYPES.includes(opts.intentSource as IntentSourceType)) {
       fail(`invalid --intent-source "${opts.intentSource}" (use ${INTENT_SOURCE_TYPES.join("|")})`);
     }
+    if (opts.selected && opts.pruned) {
+      fail("--selected and --pruned are mutually exclusive");
+    }
+
+    const diff: string | undefined = opts.diffFile
+      ? opts.diffFile === "-"
+        ? await readStdin()
+        : await readFile(opts.diffFile as string, "utf8")
+      : undefined;
 
     const recordOpts: RecordOutcomeOptions = {
       ...store,
@@ -223,6 +246,8 @@ program
           }
         : {}),
       ...((opts.traceId as string[]).length ? { traceIds: opts.traceId as string[] } : {}),
+      ...(opts.taskId ? { taskId: opts.taskId as string } : {}),
+      ...(opts.derivedFrom ? { derivedFrom: opts.derivedFrom as string } : {}),
       ...((opts.reviewedBy as string[]).length
         ? { reviewedBy: (opts.reviewedBy as string[]).map(parseReviewer) }
         : {}),
@@ -237,6 +262,10 @@ program
             },
           }
         : {}),
+      ...(opts.dirty ? { workspaceState: "dirty" as const } : {}),
+      ...(diff !== undefined ? { diff } : {}),
+      ...(opts.selected ? { selected: true } : {}),
+      ...(opts.pruned ? { selected: false } : {}),
     };
 
     const record = await recordOutcome(recordOpts);

@@ -69,6 +69,54 @@ describe("recordOutcome", () => {
     const record = await recordOutcome({ repoPath: repo });
     expect(record.verdict).toBe("unverified");
   });
+
+  it("threads task_id, derived_from, selected, workspace state and diff", async () => {
+    const repo = await makeScratchRepo();
+    const record = await recordOutcome({
+      repoPath: repo,
+      checks: [{ name: "unit", status: "pass", kind: "test" }],
+      taskId: "11111111-2222-4333-8444-555555555555",
+      derivedFrom: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      selected: false,
+      workspaceState: "dirty",
+      diff: "diff --git a/x b/x\n+hi\n",
+    });
+    expect(record.task_id).toBe("11111111-2222-4333-8444-555555555555");
+    expect(record.derived_from).toBe("66666666-7777-4888-8999-aaaaaaaaaaaa");
+    expect(record.selected).toBe(false);
+    expect(record.vcs.workspace_state).toBe("dirty");
+    expect(record.vcs.diff).toBe("diff --git a/x b/x\n+hi\n");
+  });
+
+  it("auto-derives coverage from checks and reviewedBy when checks is non-empty", async () => {
+    const repo = await makeScratchRepo();
+    const record = await recordOutcome({
+      repoPath: repo,
+      checks: [
+        { name: "unit", status: "pass", kind: "test" },
+        { name: "lint", status: "pass", kind: "lint" },
+      ],
+      reviewedBy: [{ type: "human", id: "arya" }],
+    });
+    expect(record.coverage).toEqual({
+      total: 2,
+      by_kind: { test: 1, lint: 1 },
+      has_review: true,
+    });
+  });
+
+  it("omits coverage when checks is empty, and honors an explicit override", async () => {
+    const repo = await makeScratchRepo();
+    const bare = await recordOutcome({ repoPath: repo });
+    expect(bare.coverage).toBeUndefined();
+
+    const overridden = await recordOutcome({
+      repoPath: repo,
+      checks: [{ name: "unit", status: "pass", kind: "test" }],
+      coverage: { total: 5, by_kind: { test: 5 }, has_review: true },
+    });
+    expect(overridden.coverage).toEqual({ total: 5, by_kind: { test: 5 }, has_review: true });
+  });
 });
 
 describe("verdictFor", () => {

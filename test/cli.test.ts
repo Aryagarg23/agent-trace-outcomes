@@ -14,6 +14,14 @@ async function cli(
   return defaultExec(process.execPath, [CLI, ...args], { cwd });
 }
 
+async function cliWithStdin(
+  cwd: string,
+  input: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return defaultExec(process.execPath, [CLI, ...args], { cwd, input });
+}
+
 describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
   it("record → log → verdict → lessons round-trip", async () => {
     const repo = await makeScratchRepo();
@@ -112,6 +120,100 @@ describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
     };
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
     expect(parsed.hookSpecificOutput.additionalContext).toContain("envelope test lesson");
+  });
+
+  it("threads --task-id and --derived-from into the record", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--task-id",
+      "11111111-2222-4333-8444-555555555555",
+      "--derived-from",
+      "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { task_id: string; derived_from: string };
+    expect(record.task_id).toBe("11111111-2222-4333-8444-555555555555");
+    expect(record.derived_from).toBe("66666666-7777-4888-8999-aaaaaaaaaaaa");
+  });
+
+  it("--selected and --pruned set selected true/false, and are mutually exclusive", async () => {
+    const repo = await makeScratchRepo();
+    const selected = await cli(repo, "record", "--check", "unit:test:pass", "--selected", "--json");
+    expect(selected.code).toBe(0);
+    expect((JSON.parse(selected.stdout) as { selected: boolean }).selected).toBe(true);
+
+    const pruned = await cli(repo, "record", "--check", "unit:test:pass", "--pruned", "--json");
+    expect(pruned.code).toBe(0);
+    expect((JSON.parse(pruned.stdout) as { selected: boolean }).selected).toBe(false);
+
+    const both = await cli(repo, "record", "--check", "unit:test:pass", "--selected", "--pruned");
+    expect(both.code).toBe(1);
+    expect(both.stderr).toContain("mutually exclusive");
+  });
+
+  it("--dirty marks vcs.workspace_state as dirty", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(repo, "record", "--check", "unit:test:pass", "--dirty", "--json");
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { workspace_state: string } };
+    expect(record.vcs.workspace_state).toBe("dirty");
+  });
+
+  it("--diff-file reads a file into vcs.diff", async () => {
+    const repo = await makeScratchRepo();
+    const diffText = "diff --git a/x b/x\n+hi\n";
+    await writeFile(path.join(repo, "change.diff"), diffText);
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--diff-file",
+      "change.diff",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { diff: string } };
+    expect(record.vcs.diff).toBe(diffText);
+  });
+
+  it("--diff-file - reads the diff from stdin", async () => {
+    const repo = await makeScratchRepo();
+    const diffText = "diff --git a/y b/y\n+stdin diff\n";
+    const rec = await cliWithStdin(repo, diffText, [
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--diff-file",
+      "-",
+      "--json",
+    ]);
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { diff: string } };
+    expect(record.vcs.diff).toBe(diffText);
+  });
+
+  it("auto-computes coverage from checks in the recorded output", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--check",
+      "lint:lint:pass",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as {
+      coverage: { total: number; by_kind: Record<string, number>; has_review: boolean };
+    };
+    expect(record.coverage).toEqual({ total: 2, by_kind: { test: 1, lint: 1 }, has_review: false });
   });
 
   it("fails cleanly outside a git repo", async () => {

@@ -4,13 +4,16 @@ import type {
   Check,
   CheckKind,
   CheckStatus,
+  Coverage,
   Intent,
   Lesson,
   OutcomeRecord,
   Reviewer,
   Verdict,
+  WorkspaceState,
 } from "../schemas";
 import {
+  deriveCoverage,
   OUTCOME_SPEC_VERSION,
   serializeOutcomeRecord,
   validateOutcomeRecord,
@@ -68,14 +71,26 @@ export interface RecordOutcomeOptions extends StoreOptions {
   checks?: CheckInput[];
   /** Agent Trace record IDs this outcome verifies. */
   traceIds?: string[];
+  /** Stable identifier shared by every attempt at the same task, across revisions. */
+  taskId?: string;
+  /** id of the parent outcome record this attempt forked from. */
+  derivedFrom?: string;
   /** Humans/AI systems that reviewed the change. */
   reviewedBy?: Reviewer[];
   /** What this change taught. A plain string becomes lesson.summary. */
   lesson?: string | Lesson;
   /** Full commit SHA. Defaults to HEAD of repoPath. */
   revision?: string;
+  /** Marks the checks as having run against a dirty worktree on top of revision. */
+  workspaceState?: WorkspaceState;
+  /** Unified-diff text of exactly what was tested (e.g. a dirty worktree's diff). */
+  diff?: string;
   /** Explicit verdict override. Defaults to deriveVerdict(checks). */
   verdict?: Verdict;
+  /** Explicit coverage override. Defaults to deriveCoverage(checks, reviewedBy) when checks is non-empty. */
+  coverage?: Coverage;
+  /** Whether this explored branch was the one kept (true) or pruned (false). */
+  selected?: boolean;
   /** Vendor extensions under reverse-domain namespaces. */
   metadata?: Record<string, Record<string, unknown>>;
   /** Override the generated UUID (e.g. for reproducible tests). */
@@ -109,16 +124,29 @@ export async function recordOutcome(
     id: opts.id ?? randomUUID(),
     timestamp: opts.timestamp ?? new Date().toISOString(),
     ...(opts.traceIds?.length ? { trace_ids: opts.traceIds } : {}),
-    vcs: { type: "git", revision },
+    ...(opts.taskId !== undefined ? { task_id: opts.taskId } : {}),
+    ...(opts.derivedFrom !== undefined ? { derived_from: opts.derivedFrom } : {}),
+    vcs: {
+      type: "git",
+      revision,
+      ...(opts.workspaceState !== undefined ? { workspace_state: opts.workspaceState } : {}),
+      ...(opts.diff !== undefined ? { diff: opts.diff } : {}),
+    },
     ...(opts.intent !== undefined
       ? { intent: typeof opts.intent === "string" ? { summary: opts.intent } : opts.intent }
       : {}),
     checks,
     verdict: opts.verdict ?? deriveVerdict(checks),
+    ...(opts.coverage !== undefined
+      ? { coverage: opts.coverage }
+      : checks.length > 0
+        ? { coverage: deriveCoverage(checks, opts.reviewedBy) }
+        : {}),
     ...(opts.reviewedBy?.length ? { reviewed_by: opts.reviewedBy } : {}),
     ...(opts.lesson !== undefined
       ? { lesson: typeof opts.lesson === "string" ? { summary: opts.lesson } : opts.lesson }
       : {}),
+    ...(opts.selected !== undefined ? { selected: opts.selected } : {}),
     ...(opts.metadata ? { metadata: opts.metadata } : {}),
   };
 

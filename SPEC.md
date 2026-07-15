@@ -473,8 +473,8 @@ This repository ships the reference implementation in TypeScript (Node ≥ 18, d
 - [`schemas.ts`](./schemas.ts) — the JSON Schema, generated types, a zero-dependency validator, the deterministic serializer, and the §6.6 verdict and §6.12 coverage derivation rules (`deriveVerdictFromChecks`, `deriveCoverage`).
 - [`src/store.ts`](./src/store.ts) — `OutcomeStore` over the two backends (§7.3), with injectable `exec`/`fs` for sandboxing and tests.
 - [`src/verdict.ts`](./src/verdict.ts) — the §6.6 derivation rule as a pure function.
-- [`src/index.ts`](./src/index.ts) — the library surface: `recordOutcome()`, `queryLessons()`, `queryLog()`, `verdictFor()`, `deriveVerdict()`, `deriveCoverage()`, `openStore()`.
-- [`src/cli.ts`](./src/cli.ts) — the `atrace-outcomes` CLI: `record`, `log`, `verdict`, `lessons`, `validate`.
+- [`src/index.ts`](./src/index.ts) — the library surface: `recordOutcome()`, `queryLessons()`, `queryLog()`, `verdictFor()`, `deriveVerdict()`, `deriveCoverage()`, `openStore()`. `queryLessons`/`queryLog` accept optional `verdict`/`status` filters (a value or array of `Verdict`/`CheckStatus`), applied alongside path/tag filtering with AND semantics, before `limit`.
+- [`src/cli.ts`](./src/cli.ts) — the `atrace-outcomes` CLI: `record`, `log`, `verdict`, `lessons`, `validate`. `log`/`lessons` expose `--verdict`/`--status` (repeatable). `record` also accepts `--record-json <path|->` — a full/partial Outcome Record as JSON (stdin or a file), for non-Node callers that would rather emit JSON than template CLI flags; it is validated and written through the same path as flag-based `record`.
 - [`action.yml`](./action.yml) — a GitHub Action that synthesizes outcome records from merged PRs' check runs.
 
 ## 9. Positioning and Prior Art

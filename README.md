@@ -99,6 +99,40 @@ Everything else — the full function signatures, CLI flags, storage details, an
 - [reference/integration-survey.md](./reference/integration-survey.md) — one snippet per framework
 - `atrace-outcomes --help` — the CLI's own flag reference
 
+## Using it from other languages (non-Node)
+
+The library is Node/TypeScript, but the CLI and the record format are not. A Python (or Ruby, Go, shell…) agent loop can produce and query outcome records without any Node code of its own, in two ways.
+
+**Package name vs. CLI binary name.** The npm package is `agent-trace-outcomes`; the executable it installs is `atrace-outcomes` (shorter, and namespaced under `atrace-` alongside a future `atrace-*` family). `npx -y agent-trace-outcomes <args>` and `atrace-outcomes <args>` (once installed) are the same command.
+
+**Always pass `--repo`.** Every command resolves storage relative to a repo root that defaults to the *CLI process's* current directory — not necessarily the directory your script is running from, or the repo you mean. Pass `--repo <path-to-repo>` explicitly from any non-Node caller (e.g. `subprocess.run(..., cwd=...)` in Python still works, but `--repo` is unambiguous and doesn't depend on how the subprocess was spawned).
+
+**Option 1: pipe a JSON record to `record --record-json`.** Rather than templating `--check name:kind:status` flags, build the record as a JSON object (fields match the on-disk format in [SPEC.md](./SPEC.md), snake_case) and pipe it in. `--record-json -` reads from stdin; `--record-json <path>` reads a file. Either way it's validated exactly like a flag-based `record` before being written.
+
+```python
+import json
+import subprocess
+
+record = {
+    "intent": {"summary": "fix token refresh race"},
+    "checks": [{"name": "unit-tests", "kind": "test", "status": "fail"}],
+    "lesson": {
+        "summary": "Concurrent refreshes invalidate each other; serialize them.",
+        "tags": ["auth"],
+        "applies_to": ["src/auth/**"],
+    },
+}
+
+subprocess.run(
+    ["npx", "-y", "agent-trace-outcomes", "record", "--record-json", "-", "--repo", "/path/to/repo"],
+    input=json.dumps(record),
+    text=True,
+    check=True,
+)
+```
+
+**Option 2: write the record file yourself.** The schema and storage layout are both normative (SPEC.md §6, §7.4), so a language with no CLI dependency at all can write `.agent-trace/outcomes/<sha7>-<id8>.json` directly: a JSON file named `<7-char short SHA>-<8-char id prefix>.json`, containing a record that validates against [`OUTCOME_RECORD_SCHEMA`](./schemas.ts) (or the copy in SPEC.md §6). This is the same format the files backend writes and the same directory `atrace-outcomes log`/`lessons` read from — no handshake with the CLI required, as long as the shape matches.
+
 ## Where this sits, and what it's not
 
 Every existing proposal for extending [Agent Trace](https://github.com/cursor/agent-trace) — plans, decisions, prompt correlation, trust metrics, integrity — covers the moment *before or during* a change being written. Nothing covers what happens after: whether it was checked, and what came of it. That's the gap this fills. [SPEC.md §9](./SPEC.md#9-positioning-and-prior-art) has the full citations, including how this differs from runtime agent-observability tools (which record what an agent did *during* a session, not what happened to the code afterward) and from git-ai (whose outcome-style features are closed-source; this is meant as the open counterpart).

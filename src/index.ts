@@ -308,34 +308,58 @@ function byNewest(a: OutcomeRecord, b: OutcomeRecord): number {
   return Date.parse(b.timestamp) - Date.parse(a.timestamp);
 }
 
+/** Normalize a single-value-or-array option to an array, or undefined if unset. */
+function toArray<T>(v: T | T[] | undefined): T[] | undefined {
+  if (v === undefined) return undefined;
+  return Array.isArray(v) ? v : [v];
+}
+
+function matchesVerdict(record: OutcomeRecord, verdicts: Verdict[] | undefined): boolean {
+  return verdicts === undefined || verdicts.includes(record.verdict);
+}
+
+function matchesStatus(record: OutcomeRecord, statuses: CheckStatus[] | undefined): boolean {
+  return statuses === undefined || record.checks.some((c) => statuses.includes(c.status));
+}
+
 export interface QueryLogOptions extends StoreOptions, AttributionOptions {
   /** Only records touching this repo-relative path (file or directory). */
   path?: string;
+  /** Only records whose verdict is (one of) the given verdict(s). */
+  verdict?: Verdict | Verdict[];
+  /** Only records with at least one check whose status is (one of) the given status(es). */
+  status?: CheckStatus | CheckStatus[];
   /** Maximum records to return. Default: no limit. */
   limit?: number;
 }
 
 /**
  * Outcome records, newest first, optionally filtered to those touching a
- * path. "Touching" means: the linked Agent Trace records list a file under
- * the path, or the commit's diff does, or the record's lesson is scoped to
- * it via applies_to.
+ * path, matching a verdict, and/or matching a check status. "Touching" means:
+ * the linked Agent Trace records list a file under the path, or the commit's
+ * diff does, or the record's lesson is scoped to it via applies_to. All
+ * provided filters must pass (AND semantics); filtering happens before limit.
  */
 export async function queryLog(opts: QueryLogOptions = {}): Promise<OutcomeRecord[]> {
   const records = (await openStore(opts).list()).sort(byNewest);
-  let filtered = records;
+  const verdicts = toArray(opts.verdict);
+  const statuses = toArray(opts.status);
+  let filtered = records.filter(
+    (r) => matchesVerdict(r, verdicts) && matchesStatus(r, statuses),
+  );
   if (opts.path !== undefined) {
     const q = opts.path;
-    filtered = [];
-    for (const record of records) {
+    const byPath: OutcomeRecord[] = [];
+    for (const record of filtered) {
       const scoped = record.lesson?.applies_to ?? [];
       if (scoped.some((p) => pathsOverlap(p, q))) {
-        filtered.push(record);
+        byPath.push(record);
         continue;
       }
       const files = await filesForRecord(record, opts);
-      if (files.some((f) => pathsOverlap(f, q))) filtered.push(record);
+      if (files.some((f) => pathsOverlap(f, q))) byPath.push(record);
     }
+    filtered = byPath;
   }
   return opts.limit !== undefined ? filtered.slice(0, opts.limit) : filtered;
 }
@@ -356,6 +380,10 @@ export interface QueryLessonsOptions extends StoreOptions, AttributionOptions {
   paths?: string[];
   /** Only lessons carrying at least one of these tags. */
   tags?: string[];
+  /** Only lessons whose record verdict is (one of) the given verdict(s). */
+  verdict?: Verdict | Verdict[];
+  /** Only lessons whose record has at least one check whose status is (one of) the given status(es). */
+  status?: CheckStatus | CheckStatus[];
   /** Maximum lessons to return. Default 20. */
   limit?: number;
 }
@@ -367,7 +395,9 @@ export interface QueryLessonsOptions extends StoreOptions, AttributionOptions {
  *     const lessons = await queryLessons({ paths: ["src/auth/"] })
  *
  * Returns plain JSON. A lesson matches a path query via its applies_to
- * globs, or — when it has none — via the files its change touched.
+ * globs, or — when it has none — via the files its change touched. All
+ * provided filters (paths, tags, verdict, status) must pass (AND semantics);
+ * filtering happens before limit.
  */
 export async function queryLessons(
   opts: QueryLessonsOptions = {},
@@ -378,10 +408,13 @@ export async function queryLessons(
 
   const entries: LessonEntry[] = [];
   const limit = opts.limit ?? 20;
+  const verdicts = toArray(opts.verdict);
+  const statuses = toArray(opts.status);
 
   for (const record of records) {
     if (entries.length >= limit) break;
     const lesson = record.lesson!;
+    if (!matchesVerdict(record, verdicts) || !matchesStatus(record, statuses)) continue;
     if (opts.tags?.length) {
       const tags = lesson.tags ?? [];
       if (!opts.tags.some((t) => tags.includes(t))) continue;

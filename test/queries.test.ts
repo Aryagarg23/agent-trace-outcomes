@@ -230,6 +230,100 @@ describe("queryLog", () => {
     expect(records).toHaveLength(1);
     expect(records[0]!.intent!.summary).toBe("new");
   });
+
+  describe("verdict/status filtering", () => {
+    async function seedMixed(repo: string): Promise<void> {
+      await recordOutcome({
+        repoPath: repo,
+        intent: "passed",
+        checks: [{ name: "unit", status: "pass", kind: "test" }],
+        timestamp: "2026-01-01T00:00:00Z",
+      });
+      await recordOutcome({
+        repoPath: repo,
+        intent: "failed",
+        checks: [{ name: "unit", status: "fail", kind: "test" }],
+        timestamp: "2026-01-02T00:00:00Z",
+      });
+      await recordOutcome({
+        repoPath: repo,
+        intent: "partial",
+        checks: [
+          { name: "unit", status: "pass", kind: "test" },
+          { name: "lint", status: "error", kind: "lint" },
+        ],
+        timestamp: "2026-01-03T00:00:00Z",
+      });
+      await recordOutcome({
+        repoPath: repo,
+        intent: "unverified",
+        timestamp: "2026-01-04T00:00:00Z",
+      });
+    }
+
+    it("filters by a single verdict", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+      const records = await queryLog({ repoPath: repo, verdict: "failed" });
+      expect(records).toHaveLength(1);
+      expect(records[0]!.intent!.summary).toBe("failed");
+    });
+
+    it("filters by an array of verdicts", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+      const records = await queryLog({ repoPath: repo, verdict: ["failed", "partial"] });
+      expect(records.map((r) => r.intent!.summary).sort()).toEqual(["failed", "partial"]);
+    });
+
+    it("filters by a single check status", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+      const records = await queryLog({ repoPath: repo, status: "error" });
+      expect(records).toHaveLength(1);
+      expect(records[0]!.intent!.summary).toBe("partial");
+    });
+
+    it("filters by an array of check statuses", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+      const records = await queryLog({ repoPath: repo, status: ["fail", "error"] });
+      expect(records.map((r) => r.intent!.summary).sort()).toEqual(["failed", "partial"]);
+    });
+
+    it("combines verdict and status with path filters (AND semantics)", async () => {
+      const repo = await makeScratchRepo();
+      const authSha = await commitFiles(repo, { "src/auth/token.ts": "1\n" }, "auth work");
+      await recordOutcome({
+        repoPath: repo,
+        revision: authSha,
+        intent: "auth failure",
+        checks: [{ name: "unit", status: "fail", kind: "test" }],
+      });
+      const dbSha = await commitFiles(repo, { "src/db.ts": "1\n" }, "db work");
+      await recordOutcome({
+        repoPath: repo,
+        revision: dbSha,
+        intent: "db failure",
+        checks: [{ name: "unit", status: "fail", kind: "test" }],
+      });
+
+      const authOnly = await queryLog({ repoPath: repo, path: "src/auth", verdict: "failed" });
+      expect(authOnly).toHaveLength(1);
+      expect(authOnly[0]!.intent!.summary).toBe("auth failure");
+
+      const noneVerified = await queryLog({ repoPath: repo, path: "src/auth", verdict: "verified" });
+      expect(noneVerified).toHaveLength(0);
+    });
+
+    it("filters before applying limit", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+      const records = await queryLog({ repoPath: repo, verdict: ["failed", "partial"], limit: 1 });
+      expect(records).toHaveLength(1);
+      expect(records[0]!.intent!.summary).toBe("partial"); // newest of the two
+    });
+  });
 });
 
 describe("queryLessons", () => {
@@ -298,6 +392,60 @@ describe("queryLessons", () => {
     const repo = await makeScratchRepo();
     await recordOutcome({ repoPath: repo, checks: [{ name: "unit", status: "pass" }] });
     expect(await queryLessons({ repoPath: repo })).toEqual([]);
+  });
+
+  describe("verdict/status filtering", () => {
+    it("filters by a single verdict", async () => {
+      const repo = await makeScratchRepo();
+      await seed(repo);
+      const lessons = await queryLessons({ repoPath: repo, verdict: "failed" });
+      expect(lessons).toHaveLength(1);
+      expect(lessons[0]!.intent).toBe("fix token refresh");
+    });
+
+    it("filters by an array of verdicts", async () => {
+      const repo = await makeScratchRepo();
+      await seed(repo);
+      // Both seeded records carry a lesson: one "failed", one "verified".
+      const both = await queryLessons({ repoPath: repo, verdict: ["failed", "verified"] });
+      expect(both).toHaveLength(2);
+      const failedOnly = await queryLessons({ repoPath: repo, verdict: ["failed"] });
+      expect(failedOnly).toHaveLength(1);
+      expect(failedOnly[0]!.intent).toBe("fix token refresh");
+    });
+
+    it("filters by check status", async () => {
+      const repo = await makeScratchRepo();
+      await seed(repo);
+      const lessons = await queryLessons({ repoPath: repo, status: "fail" });
+      expect(lessons).toHaveLength(1);
+      expect(lessons[0]!.intent).toBe("fix token refresh");
+
+      const passing = await queryLessons({ repoPath: repo, status: ["pass"] });
+      expect(passing).toHaveLength(1);
+      expect(passing[0]!.intent).toBe("pool tuning");
+    });
+
+    it("combines verdict/status with tags and paths (AND semantics)", async () => {
+      const repo = await makeScratchRepo();
+      await seed(repo);
+      const hits = await queryLessons({
+        repoPath: repo,
+        paths: ["src/auth/session.ts"],
+        tags: ["auth"],
+        verdict: "failed",
+        status: "fail",
+      });
+      expect(hits).toHaveLength(1);
+
+      const misses = await queryLessons({
+        repoPath: repo,
+        paths: ["src/auth/session.ts"],
+        tags: ["auth"],
+        verdict: "verified",
+      });
+      expect(misses).toHaveLength(0);
+    });
   });
 });
 

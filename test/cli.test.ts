@@ -224,4 +224,160 @@ describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
     expect(res.code).toBe(1);
     expect(res.stderr).toContain("rev-parse");
   });
+
+  describe("--verdict / --status filters on log and lessons", () => {
+    async function seedMixed(repo: string): Promise<void> {
+      await cli(repo, "record", "--intent", "passed", "--check", "unit:test:pass");
+      await cli(repo, "record", "--intent", "failed", "--check", "unit:test:fail", "--lesson", "it broke", "--tag", "x");
+      await cli(repo, "record", "--intent", "errored", "--check", "unit:test:error");
+    }
+
+    it("log --verdict filters to matching records (single and repeated)", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const failedOnly = await cli(repo, "log", "--verdict", "failed", "--json");
+      expect(failedOnly.code).toBe(0);
+      const failedRecords = JSON.parse(failedOnly.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(failedRecords).toHaveLength(1);
+      expect(failedRecords[0]!.intent!.summary).toBe("failed");
+
+      const multi = await cli(repo, "log", "--verdict", "failed", "--verdict", "partial", "--json");
+      expect(multi.code).toBe(0);
+      const multiRecords = JSON.parse(multi.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(multiRecords.map((r) => r.intent?.summary).sort()).toEqual(["errored", "failed"]);
+    });
+
+    it("log --status filters to records with a matching check status", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const errored = await cli(repo, "log", "--status", "error", "--json");
+      expect(errored.code).toBe(0);
+      const erroredRecords = JSON.parse(errored.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(erroredRecords).toHaveLength(1);
+      expect(erroredRecords[0]!.intent!.summary).toBe("errored");
+    });
+
+    it("log rejects an invalid --verdict with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "log", "--verdict", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --verdict");
+    });
+
+    it("log rejects an invalid --status with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "log", "--status", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --status");
+    });
+
+    it("lessons --verdict and --status combine with --tag", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const hit = await cli(repo, "lessons", "--verdict", "failed", "--status", "fail", "--tag", "x", "--json");
+      expect(hit.code).toBe(0);
+      const hitLessons = JSON.parse(hit.stdout) as Array<{ summary: string }>;
+      expect(hitLessons).toHaveLength(1);
+      expect(hitLessons[0]!.summary).toBe("it broke");
+
+      const miss = await cli(repo, "lessons", "--verdict", "verified", "--tag", "x", "--json");
+      expect(miss.code).toBe(0);
+      expect(JSON.parse(miss.stdout)).toEqual([]);
+    });
+
+    it("lessons rejects an invalid --verdict with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "lessons", "--verdict", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --verdict");
+    });
+  });
+
+  describe("record --record-json (non-Node stdin/file integration)", () => {
+    it("persists a record piped as JSON via stdin, readable back via log and verdict", async () => {
+      const repo = await makeScratchRepo();
+      const payload = JSON.stringify({
+        intent: { summary: "from stdin" },
+        checks: [{ name: "unit", kind: "test", status: "pass" }],
+        lesson: { summary: "stdin lesson", tags: ["py"] },
+      });
+      const rec = await cliWithStdin(repo, payload, ["record", "--record-json", "-", "--json"]);
+      expect(rec.code).toBe(0);
+      const record = JSON.parse(rec.stdout) as {
+        intent: { summary: string };
+        verdict: string;
+        vcs: { revision: string };
+      };
+      expect(record.intent.summary).toBe("from stdin");
+      expect(record.verdict).toBe("verified");
+
+      const log = await cli(repo, "log", "--json");
+      expect(log.code).toBe(0);
+      const logged = JSON.parse(log.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(logged.some((r) => r.intent?.summary === "from stdin")).toBe(true);
+
+      const verdict = await cli(repo, "verdict", record.vcs.revision);
+      expect(verdict.code).toBe(0);
+      expect(verdict.stdout).toContain("verified");
+    });
+
+    it("reads a record from a file path instead of stdin", async () => {
+      const repo = await makeScratchRepo();
+      const file = path.join(repo, "rec.json");
+      await writeFile(
+        file,
+        JSON.stringify({
+          intent: { summary: "from file" },
+          checks: [{ name: "unit", kind: "test", status: "pass" }],
+        }),
+      );
+      const rec = await cli(repo, "record", "--record-json", "rec.json", "--json");
+      expect(rec.code).toBe(0);
+      const record = JSON.parse(rec.stdout) as { intent: { summary: string } };
+      expect(record.intent.summary).toBe("from file");
+    });
+
+    it("honors --repo and --backend for the JSON input path even when cwd is not the repo", async () => {
+      const { mkdtemp } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const repo = await makeScratchRepo();
+      const elsewhere = await mkdtemp(path.join(tmpdir(), "atrace-elsewhere-"));
+      const payload = JSON.stringify({
+        checks: [{ name: "unit", kind: "test", status: "pass" }],
+      });
+      const rec = await cliWithStdin(elsewhere, payload, [
+        "record",
+        "--record-json",
+        "-",
+        "--repo",
+        repo,
+        "--backend",
+        "notes",
+        "--json",
+      ]);
+      expect(rec.code).toBe(0);
+      const verdict = await cli(repo, "verdict", "HEAD", "--backend", "notes");
+      expect(verdict.code).toBe(0);
+    });
+
+    it("exits non-zero with a clear error on invalid JSON", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cliWithStdin(repo, "not json at all", ["record", "--record-json", "-"]);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid JSON");
+    });
+
+    it("exits non-zero with a clear error on a structurally invalid record", async () => {
+      const repo = await makeScratchRepo();
+      const payload = JSON.stringify({
+        checks: [{ name: "unit", kind: "not-a-real-kind", status: "pass" }],
+      });
+      const res = await cliWithStdin(repo, payload, ["record", "--record-json", "-"]);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid outcome record");
+    });
+  });
 });

@@ -14,6 +14,14 @@ async function cli(
   return defaultExec(process.execPath, [CLI, ...args], { cwd });
 }
 
+async function cliWithStdin(
+  cwd: string,
+  input: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return defaultExec(process.execPath, [CLI, ...args], { cwd, input });
+}
+
 describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
   it("record → log → verdict → lessons round-trip", async () => {
     const repo = await makeScratchRepo();
@@ -114,6 +122,100 @@ describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
     expect(parsed.hookSpecificOutput.additionalContext).toContain("envelope test lesson");
   });
 
+  it("threads --task-id and --derived-from into the record", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--task-id",
+      "11111111-2222-4333-8444-555555555555",
+      "--derived-from",
+      "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { task_id: string; derived_from: string };
+    expect(record.task_id).toBe("11111111-2222-4333-8444-555555555555");
+    expect(record.derived_from).toBe("66666666-7777-4888-8999-aaaaaaaaaaaa");
+  });
+
+  it("--selected and --pruned set selected true/false, and are mutually exclusive", async () => {
+    const repo = await makeScratchRepo();
+    const selected = await cli(repo, "record", "--check", "unit:test:pass", "--selected", "--json");
+    expect(selected.code).toBe(0);
+    expect((JSON.parse(selected.stdout) as { selected: boolean }).selected).toBe(true);
+
+    const pruned = await cli(repo, "record", "--check", "unit:test:pass", "--pruned", "--json");
+    expect(pruned.code).toBe(0);
+    expect((JSON.parse(pruned.stdout) as { selected: boolean }).selected).toBe(false);
+
+    const both = await cli(repo, "record", "--check", "unit:test:pass", "--selected", "--pruned");
+    expect(both.code).toBe(1);
+    expect(both.stderr).toContain("mutually exclusive");
+  });
+
+  it("--dirty marks vcs.workspace_state as dirty", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(repo, "record", "--check", "unit:test:pass", "--dirty", "--json");
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { workspace_state: string } };
+    expect(record.vcs.workspace_state).toBe("dirty");
+  });
+
+  it("--diff-file reads a file into vcs.diff", async () => {
+    const repo = await makeScratchRepo();
+    const diffText = "diff --git a/x b/x\n+hi\n";
+    await writeFile(path.join(repo, "change.diff"), diffText);
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--diff-file",
+      "change.diff",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { diff: string } };
+    expect(record.vcs.diff).toBe(diffText);
+  });
+
+  it("--diff-file - reads the diff from stdin", async () => {
+    const repo = await makeScratchRepo();
+    const diffText = "diff --git a/y b/y\n+stdin diff\n";
+    const rec = await cliWithStdin(repo, diffText, [
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--diff-file",
+      "-",
+      "--json",
+    ]);
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as { vcs: { diff: string } };
+    expect(record.vcs.diff).toBe(diffText);
+  });
+
+  it("auto-computes coverage from checks in the recorded output", async () => {
+    const repo = await makeScratchRepo();
+    const rec = await cli(
+      repo,
+      "record",
+      "--check",
+      "unit:test:pass",
+      "--check",
+      "lint:lint:pass",
+      "--json",
+    );
+    expect(rec.code).toBe(0);
+    const record = JSON.parse(rec.stdout) as {
+      coverage: { total: number; by_kind: Record<string, number>; has_review: boolean };
+    };
+    expect(record.coverage).toEqual({ total: 2, by_kind: { test: 1, lint: 1 }, has_review: false });
+  });
+
   it("fails cleanly outside a git repo", async () => {
     const { mkdtemp } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
@@ -121,5 +223,161 @@ describe("atrace-outcomes CLI (end-to-end on a scratch repo)", () => {
     const res = await cli(dir, "record", "--check", "unit:test:pass");
     expect(res.code).toBe(1);
     expect(res.stderr).toContain("rev-parse");
+  });
+
+  describe("--verdict / --status filters on log and lessons", () => {
+    async function seedMixed(repo: string): Promise<void> {
+      await cli(repo, "record", "--intent", "passed", "--check", "unit:test:pass");
+      await cli(repo, "record", "--intent", "failed", "--check", "unit:test:fail", "--lesson", "it broke", "--tag", "x");
+      await cli(repo, "record", "--intent", "errored", "--check", "unit:test:error");
+    }
+
+    it("log --verdict filters to matching records (single and repeated)", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const failedOnly = await cli(repo, "log", "--verdict", "failed", "--json");
+      expect(failedOnly.code).toBe(0);
+      const failedRecords = JSON.parse(failedOnly.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(failedRecords).toHaveLength(1);
+      expect(failedRecords[0]!.intent!.summary).toBe("failed");
+
+      const multi = await cli(repo, "log", "--verdict", "failed", "--verdict", "partial", "--json");
+      expect(multi.code).toBe(0);
+      const multiRecords = JSON.parse(multi.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(multiRecords.map((r) => r.intent?.summary).sort()).toEqual(["errored", "failed"]);
+    });
+
+    it("log --status filters to records with a matching check status", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const errored = await cli(repo, "log", "--status", "error", "--json");
+      expect(errored.code).toBe(0);
+      const erroredRecords = JSON.parse(errored.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(erroredRecords).toHaveLength(1);
+      expect(erroredRecords[0]!.intent!.summary).toBe("errored");
+    });
+
+    it("log rejects an invalid --verdict with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "log", "--verdict", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --verdict");
+    });
+
+    it("log rejects an invalid --status with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "log", "--status", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --status");
+    });
+
+    it("lessons --verdict and --status combine with --tag", async () => {
+      const repo = await makeScratchRepo();
+      await seedMixed(repo);
+
+      const hit = await cli(repo, "lessons", "--verdict", "failed", "--status", "fail", "--tag", "x", "--json");
+      expect(hit.code).toBe(0);
+      const hitLessons = JSON.parse(hit.stdout) as Array<{ summary: string }>;
+      expect(hitLessons).toHaveLength(1);
+      expect(hitLessons[0]!.summary).toBe("it broke");
+
+      const miss = await cli(repo, "lessons", "--verdict", "verified", "--tag", "x", "--json");
+      expect(miss.code).toBe(0);
+      expect(JSON.parse(miss.stdout)).toEqual([]);
+    });
+
+    it("lessons rejects an invalid --verdict with a clear error", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cli(repo, "lessons", "--verdict", "bogus");
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid --verdict");
+    });
+  });
+
+  describe("record --record-json (non-Node stdin/file integration)", () => {
+    it("persists a record piped as JSON via stdin, readable back via log and verdict", async () => {
+      const repo = await makeScratchRepo();
+      const payload = JSON.stringify({
+        intent: { summary: "from stdin" },
+        checks: [{ name: "unit", kind: "test", status: "pass" }],
+        lesson: { summary: "stdin lesson", tags: ["py"] },
+      });
+      const rec = await cliWithStdin(repo, payload, ["record", "--record-json", "-", "--json"]);
+      expect(rec.code).toBe(0);
+      const record = JSON.parse(rec.stdout) as {
+        intent: { summary: string };
+        verdict: string;
+        vcs: { revision: string };
+      };
+      expect(record.intent.summary).toBe("from stdin");
+      expect(record.verdict).toBe("verified");
+
+      const log = await cli(repo, "log", "--json");
+      expect(log.code).toBe(0);
+      const logged = JSON.parse(log.stdout) as Array<{ intent?: { summary: string } }>;
+      expect(logged.some((r) => r.intent?.summary === "from stdin")).toBe(true);
+
+      const verdict = await cli(repo, "verdict", record.vcs.revision);
+      expect(verdict.code).toBe(0);
+      expect(verdict.stdout).toContain("verified");
+    });
+
+    it("reads a record from a file path instead of stdin", async () => {
+      const repo = await makeScratchRepo();
+      const file = path.join(repo, "rec.json");
+      await writeFile(
+        file,
+        JSON.stringify({
+          intent: { summary: "from file" },
+          checks: [{ name: "unit", kind: "test", status: "pass" }],
+        }),
+      );
+      const rec = await cli(repo, "record", "--record-json", "rec.json", "--json");
+      expect(rec.code).toBe(0);
+      const record = JSON.parse(rec.stdout) as { intent: { summary: string } };
+      expect(record.intent.summary).toBe("from file");
+    });
+
+    it("honors --repo and --backend for the JSON input path even when cwd is not the repo", async () => {
+      const { mkdtemp } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const repo = await makeScratchRepo();
+      const elsewhere = await mkdtemp(path.join(tmpdir(), "atrace-elsewhere-"));
+      const payload = JSON.stringify({
+        checks: [{ name: "unit", kind: "test", status: "pass" }],
+      });
+      const rec = await cliWithStdin(elsewhere, payload, [
+        "record",
+        "--record-json",
+        "-",
+        "--repo",
+        repo,
+        "--backend",
+        "notes",
+        "--json",
+      ]);
+      expect(rec.code).toBe(0);
+      const verdict = await cli(repo, "verdict", "HEAD", "--backend", "notes");
+      expect(verdict.code).toBe(0);
+    });
+
+    it("exits non-zero with a clear error on invalid JSON", async () => {
+      const repo = await makeScratchRepo();
+      const res = await cliWithStdin(repo, "not json at all", ["record", "--record-json", "-"]);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid JSON");
+    });
+
+    it("exits non-zero with a clear error on a structurally invalid record", async () => {
+      const repo = await makeScratchRepo();
+      const payload = JSON.stringify({
+        checks: [{ name: "unit", kind: "not-a-real-kind", status: "pass" }],
+      });
+      const res = await cliWithStdin(repo, payload, ["record", "--record-json", "-"]);
+      expect(res.code).toBe(1);
+      expect(res.stderr).toContain("invalid outcome record");
+    });
   });
 });

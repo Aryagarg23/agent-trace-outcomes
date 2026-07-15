@@ -51,7 +51,10 @@ describe("dual ESM + CJS build", () => {
   it("core bundles import only node builtins", async () => {
     const { builtinModules } = await import("node:module");
     const text = await readFile(path.join(root, "dist", "index.js"), "utf8");
-    const imports = [...text.matchAll(/from\s*"([^"]+)"/g)].map((m) => m[1]!);
+    // Requires at least one whitespace char between `from` and the string so
+    // this doesn't false-positive on identifiers that merely end in "from"
+    // (e.g. the schema field "derived_from") sitting next to a quote.
+    const imports = [...text.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
     expect(imports.length).toBeGreaterThan(0);
     for (const spec of imports) {
       const isBuiltin = spec.startsWith("node:") || builtinModules.includes(spec);

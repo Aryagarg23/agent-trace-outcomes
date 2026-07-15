@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { Command } from "commander";
-import type { CheckStatus, IntentSourceType, Reviewer, Verdict } from "../schemas";
+import type { CheckStatus, IntentSourceType, Reviewer, Verdict, WorkspaceState } from "../schemas";
 import {
   CHECK_KINDS,
   CHECK_STATUSES,
@@ -65,6 +65,24 @@ function parseCheckSpec(spec: string): CheckInput {
   fail(`invalid --check "${spec}": use name:status or name:kind:status`);
 }
 
+function parseVerdicts(values: string[]): Verdict[] {
+  for (const v of values) {
+    if (!VERDICTS.includes(v as Verdict)) {
+      fail(`invalid --verdict "${v}" (use ${VERDICTS.join("|")})`);
+    }
+  }
+  return values as Verdict[];
+}
+
+function parseStatuses(values: string[]): CheckStatus[] {
+  for (const v of values) {
+    if (!CHECK_STATUSES.includes(v as CheckStatus)) {
+      fail(`invalid --status "${v}" (use ${CHECK_STATUSES.join("|")})`);
+    }
+  }
+  return values as CheckStatus[];
+}
+
 function parseReviewer(spec: string): Reviewer {
   const idx = spec.indexOf(":");
   const type = idx === -1 ? "" : spec.slice(0, idx);
@@ -99,6 +117,75 @@ function truncate(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, width - 1)}…`;
 }
 
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Shape accepted by `record --record-json`: a full or partial Outcome
+ * Record object (snake_case, as in SPEC.md and on disk under
+ * `.agent-trace/outcomes/`), not the CLI's flag-based shorthand. Used by
+ * non-Node callers who'd rather emit JSON than template CLI flags.
+ */
+interface JsonRecordInput {
+  id?: unknown;
+  timestamp?: unknown;
+  trace_ids?: unknown;
+  task_id?: unknown;
+  derived_from?: unknown;
+  vcs?: { revision?: unknown; workspace_state?: unknown; diff?: unknown };
+  intent?: unknown;
+  checks?: unknown;
+  verdict?: unknown;
+  coverage?: unknown;
+  reviewed_by?: unknown;
+  lesson?: unknown;
+  selected?: unknown;
+  metadata?: unknown;
+}
+
+/**
+ * Map a JSON Outcome Record's snake_case fields onto RecordOutcomeOptions so
+ * it can be fed through the same recordOutcome() write path (and therefore
+ * the same validation) as flag-based `record`. Fields recordOutcome doesn't
+ * recognize (e.g. `version`) are ignored; recordOutcome always sets version
+ * itself.
+ */
+function recordOptionsFromJson(
+  input: JsonRecordInput,
+  store: StoreOptions,
+): RecordOutcomeOptions {
+  return {
+    ...store,
+    ...(input.id !== undefined ? { id: input.id as string } : {}),
+    ...(input.timestamp !== undefined ? { timestamp: input.timestamp as string } : {}),
+    ...(input.trace_ids !== undefined ? { traceIds: input.trace_ids as string[] } : {}),
+    ...(input.task_id !== undefined ? { taskId: input.task_id as string } : {}),
+    ...(input.derived_from !== undefined ? { derivedFrom: input.derived_from as string } : {}),
+    ...(input.vcs?.revision !== undefined ? { revision: input.vcs.revision as string } : {}),
+    ...(input.vcs?.workspace_state !== undefined
+      ? { workspaceState: input.vcs.workspace_state as WorkspaceState }
+      : {}),
+    ...(input.vcs?.diff !== undefined ? { diff: input.vcs.diff as string } : {}),
+    ...(input.intent !== undefined ? { intent: input.intent as RecordOutcomeOptions["intent"] } : {}),
+    ...(input.checks !== undefined ? { checks: input.checks as CheckInput[] } : {}),
+    ...(input.verdict !== undefined ? { verdict: input.verdict as Verdict } : {}),
+    ...(input.coverage !== undefined
+      ? { coverage: input.coverage as RecordOutcomeOptions["coverage"] }
+      : {}),
+    ...(input.reviewed_by !== undefined ? { reviewedBy: input.reviewed_by as Reviewer[] } : {}),
+    ...(input.lesson !== undefined ? { lesson: input.lesson as RecordOutcomeOptions["lesson"] } : {}),
+    ...(input.selected !== undefined ? { selected: input.selected as boolean } : {}),
+    ...(input.metadata !== undefined
+      ? { metadata: input.metadata as RecordOutcomeOptions["metadata"] }
+      : {}),
+  };
+}
+
 const program = new Command();
 
 program
@@ -125,22 +212,56 @@ program
     [] as string[],
   )
   .option("--trace-id <uuid>", "Agent Trace record ID this outcome verifies (repeatable)", collect, [] as string[])
+  .option("--task-id <uuid>", "stable id shared by every attempt at this task, across revisions")
+  .option("--derived-from <uuid>", "id of the parent outcome record this attempt forked from")
   .option("--reviewed-by <spec>", "reviewer as human:<login> or ai:<provider/model> (repeatable)", collect, [] as string[])
   .option("--lesson <summary>", "what this change taught, for future retrieval")
   .option("--tag <tag>", "lesson tag (repeatable)", collect, [] as string[])
   .option("--applies-to <path>", "path/glob the lesson applies to (repeatable)", collect, [] as string[])
   .option("--revision <sha>", "commit to record against (default: HEAD)")
+  .option("--dirty", "mark the checks as having run against a dirty worktree on top of revision")
+  .option("--diff-file <path>", "unified diff of what was tested, read from a file (or - for stdin)")
+  .option("--selected", "mark this explored branch as the one kept")
+  .option("--pruned", "mark this explored branch as pruned")
   .option("--verdict <verdict>", `override the derived verdict (${VERDICTS.join("|")})`)
   .option("--from-ci", "populate revision and a check from GitHub Actions env vars")
   .option("--status <status>", "job status for --from-ci (pass|fail|error, or success|failure|cancelled)")
   .option("--from-checks [sha]", "populate checks from the GitHub Checks API for a commit")
   .option("--github-repo <owner/repo>", "GitHub repo for --from-checks (default: origin remote)")
   .option("--token <token>", "GitHub token for --from-checks (default: GITHUB_TOKEN)")
+  .option(
+    "--record-json <path>",
+    "read a full/partial outcome record as JSON from a file, or - for stdin (non-Node integration; bypasses --check/--intent/etc, still validated and written the same way)",
+  )
   .option("--backend <backend>", "storage backend: files|notes (default: files)")
   .option("--repo <path>", "repository root (default: cwd)")
   .option("--json", "print the written record as JSON")
   .action(async (opts) => {
     const store = storeOptions(opts);
+
+    if (opts.recordJson !== undefined) {
+      const source = opts.recordJson as string;
+      const text = source === "-" ? await readStdin() : await readFile(source, "utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        fail(`--record-json: invalid JSON (${err instanceof Error ? err.message : String(err)})`);
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        fail("--record-json: expected a JSON object");
+      }
+      const record = await recordOutcome(recordOptionsFromJson(parsed as JsonRecordInput, store));
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          `recorded ${record.verdict} outcome ${record.id.slice(0, 8)} for ${record.vcs.revision.slice(0, 7)} (${record.checks.length} check${record.checks.length === 1 ? "" : "s"})\n`,
+        );
+      }
+      return;
+    }
+
     const checks: CheckInput[] = (opts.check as string[]).map(parseCheckSpec);
     let revision: string | undefined = opts.revision;
     let detailUrl: string | undefined;
@@ -200,6 +321,15 @@ program
     if (opts.intentSource && !INTENT_SOURCE_TYPES.includes(opts.intentSource as IntentSourceType)) {
       fail(`invalid --intent-source "${opts.intentSource}" (use ${INTENT_SOURCE_TYPES.join("|")})`);
     }
+    if (opts.selected && opts.pruned) {
+      fail("--selected and --pruned are mutually exclusive");
+    }
+
+    const diff: string | undefined = opts.diffFile
+      ? opts.diffFile === "-"
+        ? await readStdin()
+        : await readFile(opts.diffFile as string, "utf8")
+      : undefined;
 
     const recordOpts: RecordOutcomeOptions = {
       ...store,
@@ -223,6 +353,8 @@ program
           }
         : {}),
       ...((opts.traceId as string[]).length ? { traceIds: opts.traceId as string[] } : {}),
+      ...(opts.taskId ? { taskId: opts.taskId as string } : {}),
+      ...(opts.derivedFrom ? { derivedFrom: opts.derivedFrom as string } : {}),
       ...((opts.reviewedBy as string[]).length
         ? { reviewedBy: (opts.reviewedBy as string[]).map(parseReviewer) }
         : {}),
@@ -237,6 +369,10 @@ program
             },
           }
         : {}),
+      ...(opts.dirty ? { workspaceState: "dirty" as const } : {}),
+      ...(diff !== undefined ? { diff } : {}),
+      ...(opts.selected ? { selected: true } : {}),
+      ...(opts.pruned ? { selected: false } : {}),
     };
 
     const record = await recordOutcome(recordOpts);
@@ -254,6 +390,8 @@ program
   .description("List outcome records, optionally filtered to a path")
   .argument("[path]", "repo-relative file or directory")
   .option("--limit <n>", "maximum records", (v) => parseInt(v, 10))
+  .option("--verdict <verdict>", `filter by verdict, ${VERDICTS.join("|")} (repeatable)`, collect, [] as string[])
+  .option("--status <status>", `filter by check status, ${CHECK_STATUSES.join("|")} (repeatable)`, collect, [] as string[])
   .option("--backend <backend>", "storage backend: files|notes")
   .option("--repo <path>", "repository root (default: cwd)")
   .option("--json", "output JSON instead of a table")
@@ -262,6 +400,8 @@ program
       ...storeOptions(opts),
       ...(pathArg ? { path: pathArg } : {}),
       ...(opts.limit ? { limit: opts.limit } : {}),
+      ...((opts.verdict as string[]).length ? { verdict: parseVerdicts(opts.verdict as string[]) } : {}),
+      ...((opts.status as string[]).length ? { status: parseStatuses(opts.status as string[]) } : {}),
     });
     if (opts.json) {
       process.stdout.write(`${JSON.stringify(records, null, 2)}\n`);
@@ -310,6 +450,8 @@ program
   .description("Dump lessons from past outcomes, newest first (the agent-facing query)")
   .argument("[path]", "repo-relative file or directory the caller is about to touch")
   .option("--tag <tag>", "filter by lesson tag (repeatable)", collect, [] as string[])
+  .option("--verdict <verdict>", `filter by verdict, ${VERDICTS.join("|")} (repeatable)`, collect, [] as string[])
+  .option("--status <status>", `filter by check status, ${CHECK_STATUSES.join("|")} (repeatable)`, collect, [] as string[])
   .option("--limit <n>", "maximum lessons (default 20)", (v) => parseInt(v, 10))
   .option("--backend <backend>", "storage backend: files|notes")
   .option("--repo <path>", "repository root (default: cwd)")
@@ -323,6 +465,8 @@ program
       ...storeOptions(opts),
       ...(pathArg ? { paths: [pathArg] } : {}),
       ...((opts.tag as string[]).length ? { tags: opts.tag as string[] } : {}),
+      ...((opts.verdict as string[]).length ? { verdict: parseVerdicts(opts.verdict as string[]) } : {}),
+      ...((opts.status as string[]).length ? { status: parseStatuses(opts.status as string[]) } : {}),
       ...(opts.limit ? { limit: opts.limit } : {}),
     });
     if (opts.claudeHook !== undefined) {

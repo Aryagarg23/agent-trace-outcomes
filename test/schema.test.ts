@@ -20,6 +20,14 @@ const minimal = (): OutcomeRecord => ({
 const full = (): OutcomeRecord => ({
   ...minimal(),
   trace_ids: ["fedcba98-7654-4321-8fed-cba987654321"],
+  task_id: "11111111-2222-4333-8444-555555555555",
+  derived_from: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+  vcs: {
+    type: "git",
+    revision: SHA,
+    workspace_state: "dirty",
+    diff: "diff --git a/x b/x\n+hi\n",
+  },
   intent: {
     summary: "fix token refresh race",
     source: { type: "issue", url: "https://example.com/issues/1", path: "docs/plan.md" },
@@ -34,6 +42,7 @@ const full = (): OutcomeRecord => ({
     },
   ],
   verdict: "verified",
+  coverage: { total: 1, by_kind: { test: 1 }, has_review: true },
   reviewed_by: [
     { type: "human", id: "arya" },
     { type: "ai", id: "anthropic/claude-fable-5" },
@@ -43,6 +52,7 @@ const full = (): OutcomeRecord => ({
     tags: ["auth", "race-condition"],
     applies_to: ["src/auth/**"],
   },
+  selected: true,
   metadata: { "com.example": { run: 1 } },
 });
 
@@ -123,6 +133,90 @@ describe("validateOutcomeRecord", () => {
     expect(jj.valid).toBe(true);
   });
 
+  it("validates task_id and derived_from as UUIDs", () => {
+    expectError({ ...minimal(), task_id: "not-a-uuid" }, "task_id");
+    expectError({ ...minimal(), derived_from: "not-a-uuid" }, "derived_from");
+    const ok = validateOutcomeRecord({
+      ...minimal(),
+      task_id: "11111111-2222-4333-8444-555555555555",
+      derived_from: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    });
+    expect(ok.valid).toBe(true);
+  });
+
+  it("validates vcs.workspace_state and vcs.diff", () => {
+    expectError(
+      { ...minimal(), vcs: { type: "git", revision: SHA, workspace_state: "filthy" } },
+      "vcs.workspace_state",
+    );
+    expectError(
+      { ...minimal(), vcs: { type: "git", revision: SHA, diff: "" } },
+      "vcs.diff",
+    );
+    const ok = validateOutcomeRecord({
+      ...minimal(),
+      vcs: { type: "git", revision: SHA, workspace_state: "dirty", diff: "diff --git a/x b/x\n" },
+    });
+    expect(ok.valid).toBe(true);
+    // workspace_state does not relax the git SHA requirement.
+    expectError(
+      { ...minimal(), vcs: { type: "git", revision: "abc123", workspace_state: "dirty" } },
+      "40-character",
+    );
+  });
+
+  it("validates selected as a boolean", () => {
+    expectError({ ...minimal(), selected: "true" }, "selected: expected boolean");
+    const ok = validateOutcomeRecord({ ...minimal(), selected: false });
+    expect(ok.valid).toBe(true);
+  });
+
+  it("validates coverage shape", () => {
+    expectError({ ...minimal(), coverage: {} }, 'coverage: missing required field "total"');
+    expectError(
+      { ...minimal(), coverage: { total: -1, by_kind: {}, has_review: false } },
+      "coverage.total",
+    );
+    expectError(
+      { ...minimal(), coverage: { total: 0, by_kind: { vibes: 1 }, has_review: false } },
+      "coverage.by_kind",
+    );
+    expectError(
+      { ...minimal(), coverage: { total: 0, by_kind: { test: 0 }, has_review: false } },
+      'coverage.by_kind["test"]',
+    );
+    expectError(
+      { ...minimal(), coverage: { total: 0, by_kind: {}, has_review: "yes" } },
+      "coverage.has_review",
+    );
+  });
+
+  it("warns (not errors) when coverage disagrees with the derivation rule", () => {
+    const record = {
+      ...minimal(),
+      checks: [{ name: "t", kind: "test" as const, status: "pass" as const }],
+      verdict: "verified" as const,
+      coverage: { total: 99, by_kind: {}, has_review: false },
+    };
+    const result = validateOutcomeRecord(record);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.join("\n")).toContain("coverage");
+    expect(result.warnings.join("\n")).toContain("derivation rule");
+  });
+
+  it("derives has_review from reviewed_by even with no review-kind check", () => {
+    const record = {
+      ...minimal(),
+      checks: [{ name: "t", kind: "test" as const, status: "pass" as const }],
+      verdict: "verified" as const,
+      reviewed_by: [{ type: "human" as const, id: "arya" }],
+      coverage: { total: 1, by_kind: { test: 1 }, has_review: true },
+    };
+    const result = validateOutcomeRecord(record);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+
   it("requires intent.summary and a valid source type", () => {
     expectError({ ...minimal(), intent: {} }, "intent.summary");
     expectError(
@@ -192,12 +286,16 @@ describe("serializeOutcomeRecord", () => {
       "id",
       "timestamp",
       "trace_ids",
+      "task_id",
+      "derived_from",
       "vcs",
       "intent",
       "checks",
       "verdict",
+      "coverage",
       "reviewed_by",
       "lesson",
+      "selected",
       "metadata",
     ]);
   });
@@ -206,8 +304,9 @@ describe("serializeOutcomeRecord", () => {
     const parsed = JSON.parse(serializeOutcomeRecord(full())) as {
       checks: Array<Record<string, unknown>>;
       vcs: Record<string, unknown>;
+      coverage: Record<string, unknown>;
     };
-    expect(Object.keys(parsed.vcs)).toEqual(["type", "revision"]);
+    expect(Object.keys(parsed.vcs)).toEqual(["type", "revision", "workspace_state", "diff"]);
     expect(Object.keys(parsed.checks[0]!)).toEqual([
       "name",
       "kind",
@@ -215,6 +314,7 @@ describe("serializeOutcomeRecord", () => {
       "detail_url",
       "summary",
     ]);
+    expect(Object.keys(parsed.coverage)).toEqual(["total", "by_kind", "has_review"]);
   });
 });
 

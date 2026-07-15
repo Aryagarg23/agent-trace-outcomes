@@ -9,7 +9,7 @@
  * See SPEC.md for the normative specification.
  */
 
-export const OUTCOME_SPEC_VERSION = "0.1.0";
+export const OUTCOME_SPEC_VERSION = "0.2.0";
 
 export const OUTCOME_MIME_TYPE = "application/vnd.agent-trace.outcome+json";
 
@@ -37,9 +37,19 @@ export type IntentSourceType =
   | "conversation"
   | "manual";
 
+export type WorkspaceState = "clean" | "dirty";
+
 export interface Vcs {
   type: VcsType;
   revision: string;
+  /**
+   * Marks that the recorded checks ran against uncommitted worktree changes
+   * on top of `revision` (which remains the full base-commit SHA). Omitted
+   * or "clean" means the worktree matched `revision` exactly.
+   */
+  workspace_state?: WorkspaceState;
+  /** Unified-diff text of exactly what was tested, e.g. a dirty worktree's diff. */
+  diff?: string;
 }
 
 export interface IntentSource {
@@ -72,17 +82,44 @@ export interface Lesson {
   applies_to?: string[];
 }
 
+/**
+ * Derived aggregate of `checks[]` (and `reviewed_by`), analogous to
+ * `verdict`: a compact fact for fleet triage without re-scanning every
+ * check. Never a score or ranking (SPEC.md §1.1, §3).
+ */
+export interface Coverage {
+  /** Count of checks[]. */
+  total: number;
+  /** Counts per check kind that appears; zero-count kinds are omitted. */
+  by_kind: Partial<Record<CheckKind, number>>;
+  /** True if any check has kind "review" or reviewed_by is non-empty. */
+  has_review: boolean;
+}
+
 export interface OutcomeRecord {
   version: string;
   id: string;
   timestamp: string;
   trace_ids?: string[];
+  /**
+   * Stable identifier shared by every attempt at the same task, across
+   * revisions — groups attempts without requiring an intent object.
+   */
+  task_id?: string;
+  /** id of the parent outcome record this attempt forked from. */
+  derived_from?: string;
   vcs: Vcs;
   intent?: Intent;
   checks: Check[];
   verdict: Verdict;
+  coverage?: Coverage;
   reviewed_by?: Reviewer[];
   lesson?: Lesson;
+  /**
+   * Whether this explored branch was the one kept (true) or pruned (false).
+   * A fact about which branch was chosen, never a quality judgment.
+   */
+  selected?: boolean;
   metadata?: Record<string, Record<string, unknown>>;
 }
 
@@ -113,6 +150,8 @@ export const VERDICTS: readonly Verdict[] = [
 ];
 
 export const VCS_TYPES: readonly VcsType[] = ["git", "jj", "hg", "svn"];
+
+export const WORKSPACE_STATES: readonly WorkspaceState[] = ["clean", "dirty"];
 
 export const INTENT_SOURCE_TYPES: readonly IntentSourceType[] = [
   "issue",
@@ -167,6 +206,18 @@ export const OUTCOME_RECORD_SCHEMA = {
       description:
         "IDs of the Agent Trace record(s) this outcome verifies. Optional: outcome records are writable even when no Agent Trace producer is installed.",
     },
+    task_id: {
+      type: "string",
+      pattern: UUID_PATTERN,
+      description:
+        "Stable identifier shared by every attempt at the same task, across revisions. Optional: groups attempts without requiring an intent object.",
+    },
+    derived_from: {
+      type: "string",
+      pattern: UUID_PATTERN,
+      description:
+        "id of the parent outcome record this attempt forked from. With task_id, reconstructs the exploration DAG across attempts.",
+    },
     vcs: { $ref: "#/$defs/vcs" },
     intent: { $ref: "#/$defs/intent" },
     checks: {
@@ -181,12 +232,18 @@ export const OUTCOME_RECORD_SCHEMA = {
       description:
         "Aggregate result derived from checks per the normative rule in SPEC.md §6.6.",
     },
+    coverage: { $ref: "#/$defs/coverage" },
     reviewed_by: {
       type: "array",
       items: { $ref: "#/$defs/reviewer" },
       description: "Humans or AI systems that reviewed the change.",
     },
     lesson: { $ref: "#/$defs/lesson" },
+    selected: {
+      type: "boolean",
+      description:
+        "Whether this explored branch was the one kept (true) or pruned (false). A fact about which branch was chosen, never a quality judgment.",
+    },
     metadata: {
       type: "object",
       propertyNames: { pattern: METADATA_KEY_PATTERN },
@@ -203,6 +260,18 @@ export const OUTCOME_RECORD_SCHEMA = {
       properties: {
         type: { type: "string", enum: VCS_TYPES as VcsType[] },
         revision: { type: "string", minLength: 1 },
+        workspace_state: {
+          type: "string",
+          enum: WORKSPACE_STATES as WorkspaceState[],
+          description:
+            "Marks that the recorded checks ran against uncommitted worktree changes on top of revision (which remains the full base-commit SHA). Omitted or 'clean' means the worktree matched revision exactly.",
+        },
+        diff: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Unified-diff text of exactly what was tested, e.g. a dirty worktree's diff.",
+        },
       },
       if: { properties: { type: { const: "git" } } },
       then: { properties: { revision: { pattern: "^[0-9a-f]{40}$" } } },
@@ -289,6 +358,32 @@ export const OUTCOME_RECORD_SCHEMA = {
         },
       },
     },
+    coverage: {
+      type: "object",
+      required: ["total", "by_kind", "has_review"],
+      additionalProperties: false,
+      properties: {
+        total: {
+          type: "integer",
+          minimum: 0,
+          description: "Count of checks[].",
+        },
+        by_kind: {
+          type: "object",
+          propertyNames: { enum: CHECK_KINDS as CheckKind[] },
+          additionalProperties: { type: "integer", minimum: 1 },
+          description:
+            "Counts per check kind that appears; zero-count kinds are omitted.",
+        },
+        has_review: {
+          type: "boolean",
+          description:
+            'True if any check has kind "review" or reviewed_by is non-empty.',
+        },
+      },
+      description:
+        "Derived aggregate of checks[] (and reviewed_by), analogous to verdict: a compact fact for fleet triage without re-scanning every check. Never a score or ranking.",
+    },
   },
 } as const;
 
@@ -325,6 +420,14 @@ function checkString(
   }
   if (opts.pattern && !opts.pattern.test(v)) {
     errors.push(`${path}: "${v}" does not match required format`);
+    return false;
+  }
+  return true;
+}
+
+function checkBoolean(errors: string[], path: string, v: unknown): v is boolean {
+  if (typeof v !== "boolean") {
+    errors.push(`${path}: expected boolean, got ${v === null ? "null" : typeof v}`);
     return false;
   }
   return true;
@@ -380,12 +483,16 @@ export function validateOutcomeRecord(value: unknown): ValidationResult {
     "id",
     "timestamp",
     "trace_ids",
+    "task_id",
+    "derived_from",
     "vcs",
     "intent",
     "checks",
     "verdict",
+    "coverage",
     "reviewed_by",
     "lesson",
+    "selected",
     "metadata",
   ]);
 
@@ -418,16 +525,35 @@ export function validateOutcomeRecord(value: unknown): ValidationResult {
     }
   }
 
+  if ("task_id" in value && value.task_id !== undefined) {
+    checkString(errors, "task_id", value.task_id, { pattern: reUuid });
+  }
+
+  if ("derived_from" in value && value.derived_from !== undefined) {
+    checkString(errors, "derived_from", value.derived_from, { pattern: reUuid });
+  }
+
   if ("vcs" in value) {
     if (!isObject(value.vcs)) {
       errors.push("vcs: expected object");
     } else {
-      checkNoExtraKeys(warnings, "vcs", value.vcs, ["type", "revision"]);
+      checkNoExtraKeys(warnings, "vcs", value.vcs, [
+        "type",
+        "revision",
+        "workspace_state",
+        "diff",
+      ]);
       const typeOk = checkEnum(errors, "vcs.type", value.vcs.type, VCS_TYPES);
       if (checkString(errors, "vcs.revision", value.vcs.revision, { nonEmpty: true })) {
         if (typeOk && value.vcs.type === "git" && !reGitSha.test(value.vcs.revision as string)) {
           errors.push("vcs.revision: git revisions must be full 40-character lowercase hex SHAs");
         }
+      }
+      if (value.vcs.workspace_state !== undefined) {
+        checkEnum(errors, "vcs.workspace_state", value.vcs.workspace_state, WORKSPACE_STATES);
+      }
+      if (value.vcs.diff !== undefined) {
+        checkString(errors, "vcs.diff", value.vcs.diff, { nonEmpty: true });
       }
     }
   }
@@ -516,6 +642,44 @@ export function validateOutcomeRecord(value: unknown): ValidationResult {
     }
   }
 
+  if ("coverage" in value && value.coverage !== undefined) {
+    if (!isObject(value.coverage)) {
+      errors.push("coverage: expected object");
+    } else {
+      checkNoExtraKeys(warnings, "coverage", value.coverage, ["total", "by_kind", "has_review"]);
+      for (const field of ["total", "by_kind", "has_review"]) {
+        if (!(field in value.coverage)) errors.push(`coverage: missing required field "${field}"`);
+      }
+      if ("total" in value.coverage) {
+        const total = value.coverage.total;
+        if (typeof total !== "number" || !Number.isInteger(total) || total < 0) {
+          errors.push("coverage.total: expected a non-negative integer");
+        }
+      }
+      if ("by_kind" in value.coverage) {
+        if (!isObject(value.coverage.by_kind)) {
+          errors.push("coverage.by_kind: expected object");
+        } else {
+          for (const [k, v] of Object.entries(value.coverage.by_kind)) {
+            if (!CHECK_KINDS.includes(k as CheckKind)) {
+              errors.push(`coverage.by_kind: key "${k}" must be one of ${CHECK_KINDS.join(", ")}`);
+            }
+            if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
+              errors.push(`coverage.by_kind["${k}"]: expected a positive integer`);
+            }
+          }
+        }
+      }
+      if ("has_review" in value.coverage) {
+        checkBoolean(errors, "coverage.has_review", value.coverage.has_review);
+      }
+    }
+  }
+
+  if ("selected" in value && value.selected !== undefined) {
+    checkBoolean(errors, "selected", value.selected);
+  }
+
   if ("metadata" in value && value.metadata !== undefined) {
     if (!isObject(value.metadata)) {
       errors.push("metadata: expected object");
@@ -543,9 +707,30 @@ export function validateOutcomeRecord(value: unknown): ValidationResult {
         `verdict: "${record.verdict}" does not match the derivation rule (expected "${derived}" from checks)`,
       );
     }
+
+    // Coverage consistency, same treatment as verdict: a derived fact, so an
+    // explicitly overridden value still validates, just with a warning.
+    if (record.coverage !== undefined) {
+      const derivedCoverage = deriveCoverage(record.checks, record.reviewed_by);
+      if (!coverageEquals(record.coverage, derivedCoverage)) {
+        warnings.push(
+          `coverage: ${JSON.stringify(record.coverage)} does not match the derivation rule (expected ${JSON.stringify(derivedCoverage)} from checks/reviewed_by)`,
+        );
+      }
+    }
   }
 
   return { valid: errors.length === 0, errors, warnings };
+}
+
+function coverageEquals(a: Coverage, b: Coverage): boolean {
+  if (a.total !== b.total || a.has_review !== b.has_review) return false;
+  const aKeys = Object.keys(a.by_kind).sort();
+  const bKeys = Object.keys(b.by_kind).sort();
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every(
+    (k, i) => k === bKeys[i] && a.by_kind[k as CheckKind] === b.by_kind[k as CheckKind],
+  );
 }
 
 /**
@@ -562,6 +747,24 @@ export function deriveVerdictFromChecks(checks: readonly Check[]): Verdict {
 }
 
 /**
+ * Derive the coverage aggregate (SPEC.md §6.x) from checks and reviewers: a
+ * compact fact for fleet triage without re-scanning every check. Pure
+ * function; no I/O.
+ */
+export function deriveCoverage(
+  checks: readonly Check[],
+  reviewedBy?: readonly Reviewer[],
+): Coverage {
+  const by_kind: Partial<Record<CheckKind, number>> = {};
+  for (const c of checks) {
+    by_kind[c.kind] = (by_kind[c.kind] ?? 0) + 1;
+  }
+  const has_review =
+    checks.some((c) => c.kind === "review") || (reviewedBy?.length ?? 0) > 0;
+  return { total: checks.length, by_kind, has_review };
+}
+
+/**
  * Canonical field order for serialization. Deterministic ordering keeps
  * outcome records digestible under any cryptographic profile adopted
  * upstream (see cursor/agent-trace#31).
@@ -572,18 +775,23 @@ const FIELD_ORDER: Record<string, readonly string[]> = {
     "id",
     "timestamp",
     "trace_ids",
+    "task_id",
+    "derived_from",
     "vcs",
     "intent",
     "checks",
     "verdict",
+    "coverage",
     "reviewed_by",
     "lesson",
+    "selected",
     "metadata",
   ],
-  vcs: ["type", "revision"],
+  vcs: ["type", "revision", "workspace_state", "diff"],
   intent: ["summary", "source"],
   "intent.source": ["type", "url", "path"],
   "checks[]": ["name", "kind", "status", "detail_url", "summary"],
+  coverage: ["total", "by_kind", "has_review"],
   "reviewed_by[]": ["type", "id"],
   lesson: ["summary", "tags", "applies_to"],
 };

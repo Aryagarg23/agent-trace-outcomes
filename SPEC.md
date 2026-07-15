@@ -1,6 +1,6 @@
 # Outcome Records for Agent Trace
 
-**Version**: 0.1.0<br>
+**Version**: 0.2.0<br>
 **Status**: RFC<br>
 **Date**: July 2026
 
@@ -65,9 +65,11 @@ Agent Trace's non-goals state: *"We don't evaluate whether AI contributions are 
 - **Outcome Record:** Metadata describing the verified outcome of a change: its checks, verdict, reviewers, and lesson.
 - **Check:** A single verification event that was observed for a change — a test run, a lint pass, a build, a review, a deployment.
 - **Verdict:** The mechanical aggregation of a record's checks under the derivation rule in §6.6.
+- **Coverage:** The mechanical aggregation of a record's checks (and reviewers) into counts, under the derivation rule in §6.12.
 - **Intent:** A one-line statement of what the change was trying to do, optionally linked to its source (issue, plan, decision, conversation).
 - **Lesson:** A short statement of what the change taught, scoped to paths it applies to.
 - **Verification gate:** The moment in a host workflow where a change's checks complete — the natural write point for an Outcome Record.
+- **Task:** The unit of work a fleet of attempts is trying to solve, identified by `task_id` (§6.10); a single task may have many outcome records across attempts and revisions.
 
 ## 5. Architecture Overview
 
@@ -112,7 +114,7 @@ An Outcome Record is a JSON document. Required fields: `version`, `id`, `timesta
 }
 ```
 
-The full JSON Schema (draft 2020-12) is reproduced in §6.10 and ships as `OUTCOME_RECORD_SCHEMA` in [`schemas.ts`](./schemas.ts).
+The full JSON Schema (draft 2020-12) is reproduced in §6.14 and ships as `OUTCOME_RECORD_SCHEMA` in [`schemas.ts`](./schemas.ts).
 
 ### 6.1 version, id, timestamp
 
@@ -129,6 +131,11 @@ An optional array of UUIDs identifying the Agent Trace record(s) this outcome ve
 ### 6.3 vcs
 
 Identical in shape to the parent spec's `$defs/vcs`: `type` is one of `git | jj | hg | svn`, and `revision` is the revision identifier (git commit SHA, jj change ID, hg changeset). For `git`, the revision is the full 40-character SHA. Unlike the parent (where `vcs` is optional), `vcs` is **required** here: an outcome is meaningless without the change it describes.
+
+Two additional optional fields cover checks run against a dirty worktree, i.e. uncommitted changes on top of `revision`:
+
+- `workspace_state` — one of `clean | dirty`. `dirty` marks that the recorded checks ran against uncommitted worktree changes on top of `revision`, which remains the full base-commit SHA — this field never relaxes the SHA requirement, it only annotates that the tree deviated from it. Omitted or `clean` means the worktree matched `revision` exactly.
+- `diff` — unified-diff text of exactly what was tested, for the common case where that differs from the committed revision (a dirty worktree). Free-form string, non-empty when present.
 
 ### 6.4 intent
 
@@ -190,7 +197,33 @@ The lesson exists so that accumulated outcome records can serve as memory for co
 
 An optional object for vendor extensions, following the parent spec's namespacing convention exactly: keys are reverse-domain vendor namespaces (e.g. `dev.cursor`, `com.github.copilot`) and values are objects. Vendors add custom data without breaking compatibility.
 
-### 6.10 JSON Schema
+### 6.10 task_id
+
+An optional UUID, stable across every attempt at the same task, regardless of revision or how many attempts were made. Where `trace_ids` (§6.2) links an outcome to *how* a change was produced, `task_id` groups outcomes by *what they were attempting*: consumers can group records by `task_id` to read a per-task trajectory across revisions — every attempt at "fix the auth race", in order, with its verdict. `task_id` is a top-level field, not nested under `intent` (§6.4), specifically so this grouping works even when a record carries no `intent` object.
+
+### 6.11 derived_from
+
+An optional UUID: the `id` (§6.1) of the parent outcome record this attempt forked from. Combined with `task_id` (§6.10), a set of records reconstructs the exploration DAG a fleet of attempts took at a task — which attempt branched from which. Combined further with `selected` (§6.13), the DAG shows which branch was ultimately kept.
+
+### 6.12 coverage
+
+An optional derived aggregate of `checks[]` (and `reviewed_by`), analogous to `verdict` (§6.6): a compact summary so a consumer doing fleet triage across many records does not need to re-scan every check to know what ran.
+
+```json
+{ "total": 3, "by_kind": { "test": 1, "lint": 1, "typecheck": 1 }, "has_review": true }
+```
+
+- `total` — count of `checks[]`.
+- `by_kind` — count of checks per `kind` (§6.5) that appears at least once; kinds with zero checks are omitted.
+- `has_review` — `true` if any check has `kind: "review"`, or `reviewed_by` (§6.7) is non-empty.
+
+Like `verdict`, `coverage` adds no information beyond `checks` and `reviewed_by` — it exists purely so consumers can filter or triage without re-deriving it, and, like `verdict`, it states a fact about what ran, never a judgment of how well it ran. A producer that writes `checks` should write the matching `coverage`; the reference validator treats a `coverage` inconsistent with the derivation as a warning (mirroring the §6.6 verdict-consistency rule), not an error, since a record may deliberately override it.
+
+### 6.13 selected
+
+An optional boolean marking whether this explored branch was the one kept (`true`) or pruned (`false`). Meaningful when a host runs multiple attempts at the same task (grouped via `task_id`, §6.10, optionally linked via `derived_from`, §6.11) and keeps one: `selected` records *which* branch was chosen — a fact about the outcome of an exploration process, the same way `verdict` is a fact about check results. It is never a quality score or ranking of the branches against each other (§1.1, §3). A record with no `selected` field makes no claim either way, e.g. a single-attempt workflow with no branching.
+
+### 6.14 JSON Schema
 
 ```json
 {
@@ -225,6 +258,16 @@ An optional object for vendor extensions, following the parent spec's namespacin
       },
       "description": "IDs of the Agent Trace record(s) this outcome verifies. Optional: outcome records are writable even when no Agent Trace producer is installed."
     },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "description": "Stable identifier shared by every attempt at the same task, across revisions. Optional: groups attempts without requiring an intent object."
+    },
+    "derived_from": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "description": "id of the parent outcome record this attempt forked from. With task_id, reconstructs the exploration DAG across attempts."
+    },
     "vcs": { "$ref": "#/$defs/vcs" },
     "intent": { "$ref": "#/$defs/intent" },
     "checks": {
@@ -237,12 +280,17 @@ An optional object for vendor extensions, following the parent spec's namespacin
       "enum": ["verified", "failed", "partial", "unverified"],
       "description": "Aggregate result derived from checks per the normative rule in SPEC.md §6.6."
     },
+    "coverage": { "$ref": "#/$defs/coverage" },
     "reviewed_by": {
       "type": "array",
       "items": { "$ref": "#/$defs/reviewer" },
       "description": "Humans or AI systems that reviewed the change."
     },
     "lesson": { "$ref": "#/$defs/lesson" },
+    "selected": {
+      "type": "boolean",
+      "description": "Whether this explored branch was the one kept (true) or pruned (false). A fact about which branch was chosen, never a quality judgment."
+    },
     "metadata": {
       "type": "object",
       "propertyNames": { "pattern": "^[a-z0-9-]+(\\.[a-zA-Z0-9-]+)+$" },
@@ -257,7 +305,17 @@ An optional object for vendor extensions, following the parent spec's namespacin
       "additionalProperties": false,
       "properties": {
         "type": { "type": "string", "enum": ["git", "jj", "hg", "svn"] },
-        "revision": { "type": "string", "minLength": 1 }
+        "revision": { "type": "string", "minLength": 1 },
+        "workspace_state": {
+          "type": "string",
+          "enum": ["clean", "dirty"],
+          "description": "Marks that the recorded checks ran against uncommitted worktree changes on top of revision (which remains the full base-commit SHA). Omitted or 'clean' means the worktree matched revision exactly."
+        },
+        "diff": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unified-diff text of exactly what was tested, e.g. a dirty worktree's diff."
+        }
       },
       "if": { "properties": { "type": { "const": "git" } } },
       "then": { "properties": { "revision": { "pattern": "^[0-9a-f]{40}$" } } },
@@ -342,6 +400,31 @@ An optional object for vendor extensions, following the parent spec's namespacin
           "description": "Repo-relative paths/globs this lesson is relevant to."
         }
       }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["total", "by_kind", "has_review"],
+      "additionalProperties": false,
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of checks[]."
+        },
+        "by_kind": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["test", "lint", "typecheck", "build", "security", "review", "manual", "deploy", "other"]
+          },
+          "additionalProperties": { "type": "integer", "minimum": 1 },
+          "description": "Counts per check kind that appears; zero-count kinds are omitted."
+        },
+        "has_review": {
+          "type": "boolean",
+          "description": "True if any check has kind \"review\" or reviewed_by is non-empty."
+        }
+      },
+      "description": "Derived aggregate of checks[] (and reviewed_by), analogous to verdict: a compact fact for fleet triage without re-scanning every check. Never a score or ranking."
     }
   }
 }
@@ -387,11 +470,11 @@ The specification is storage-unopinionated. The reference implementation provide
 
 This repository ships the reference implementation in TypeScript (Node ≥ 18, dual ESM/CJS, zero runtime dependencies in the core):
 
-- [`schemas.ts`](./schemas.ts) — the JSON Schema, generated types, a zero-dependency validator, and the deterministic serializer.
+- [`schemas.ts`](./schemas.ts) — the JSON Schema, generated types, a zero-dependency validator, the deterministic serializer, and the §6.6 verdict and §6.12 coverage derivation rules (`deriveVerdictFromChecks`, `deriveCoverage`).
 - [`src/store.ts`](./src/store.ts) — `OutcomeStore` over the two backends (§7.3), with injectable `exec`/`fs` for sandboxing and tests.
 - [`src/verdict.ts`](./src/verdict.ts) — the §6.6 derivation rule as a pure function.
-- [`src/index.ts`](./src/index.ts) — the library surface: `recordOutcome()`, `queryLessons()`, `queryLog()`, `verdictFor()`, `deriveVerdict()`, `openStore()`.
-- [`src/cli.ts`](./src/cli.ts) — the `atrace-outcomes` CLI: `record`, `log`, `verdict`, `lessons`, `validate`.
+- [`src/index.ts`](./src/index.ts) — the library surface: `recordOutcome()`, `queryLessons()`, `queryLog()`, `verdictFor()`, `deriveVerdict()`, `deriveCoverage()`, `openStore()`. `queryLessons`/`queryLog` accept optional `verdict`/`status` filters (a value or array of `Verdict`/`CheckStatus`), applied alongside path/tag filtering with AND semantics, before `limit`.
+- [`src/cli.ts`](./src/cli.ts) — the `atrace-outcomes` CLI: `record`, `log`, `verdict`, `lessons`, `validate`. `log`/`lessons` expose `--verdict`/`--status` (repeatable). `record` also accepts `--record-json <path|->` — a full/partial Outcome Record as JSON (stdin or a file), for non-Node callers that would rather emit JSON than template CLI flags; it is validated and written through the same path as flag-based `record`.
 - [`action.yml`](./action.yml) — a GitHub Action that synthesizes outcome records from merged PRs' check runs.
 
 ## 9. Positioning and Prior Art

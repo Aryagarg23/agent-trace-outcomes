@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "id": "3b9835a4-34e7-43ea-965f-c4ef0bff634b",
+  "timestamp": "2026-07-16T01:33:26.646Z",
+  "vcs": {
+    "type": "git",
+    "revision": "2d17f3a10b2f2cf30ddf7ae7e612cf0629a2ae35"
+  },
+  "intent": {
+    "summary": "Prepare the 0.2.0 release for npm: verify typecheck, tests, and a dry-run publish all succeed (loop iteration 1)"
+  },
+  "checks": [
+    {
+      "name": "check_command",
+      "kind": "test",
+      "status": "pass",
+      "summary": "npm warn publish npm auto-corrected some errors in your package.json when publishing.  Please run \"npm pkg fix\" to address these errors.\nnpm warn publish errors corrected:\nnpm warn publish \"bin[atrace-outcomes]\" script name dist/cli.js was invalid and removed\nnpm notice\nnpm notice 📦  agent-trace-outcomes@0.2.0\nnpm notice Tarball Contents\nnpm notice 8.0kB AGENTS.md\nnpm notice 1.3kB LICENSE\nnpm notice 8.8kB README.md\nnpm notice 35.0kB SPEC.md\nnpm notice 3.9kB action.yml\nnpm notice 48.3kB dist/cli.cjs\nnpm notice 20B dist/cli.d.cts\nnpm notice 20B dist/cli.d.ts\nnpm notice 46.9kB dist/cli.js\nnpm notice 40.8kB dist/index.cjs\nnpm notice 12.7kB dist/index.d.cts\nnpm notice 12.7kB dist/index.d.ts\nnpm notice 37.7kB dist/index.js\nnpm notice 22.0kB dist/schemas.cjs\nnpm notice 16.9kB dist/schemas.d.cts\nnpm notice 16.9kB dist/schemas.d.ts\nnpm notice 20.4kB dist/schemas.js\nnpm notice 1.7kB package.json\nnpm notice 26.4kB schemas.ts\nnpm notice Tarball Details\nnpm notice name: agent-trace-outcomes\nnpm notice version: 0.2.0\nnpm notice filename: agent-trace-outcomes-0.2.0.tgz\nnpm notice package size: 92.1 kB\nnpm notice unpacked size: 360.5 kB\nnpm notice shasum: f9f1fe7d982846574834c0e5404b8dcc1fe7f46b\nnpm notice integrity: sha512-lLJam+BGgYbG6[...]XQO0fxoCO1rug==\nnpm notice total files: 19\nnpm notice\nnpm warn publish This command requires you to be logged in to https://registry.npmjs.org/ (dry-run)\nnpm notice Publishing to https://registry.npmjs.org/ with tag latest and default access (dry-run)"
+    }
+  ],
+  "verdict": "verified",
+  "coverage": {
+    "total": 1,
+    "by_kind": {
+      "test": 1
+    },
+    "has_review": false
+  }
+}
